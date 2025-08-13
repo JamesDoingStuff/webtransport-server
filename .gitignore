@@ -1,0 +1,5 @@
+certificate.*
+client.*
+.venv
+.3.10-venv
+fingerprint.txt
