@@ -18,12 +18,13 @@ BIND_PORT = 4433
 
 
 class Handler:
-    def __init__(self, id, http: H3Connection) -> None:
+    def __init__(self, protocol, id, http: H3Connection) -> None:
         self._id = id
         self._http = http
         self._current_temp = 0.0
         self._update_task = None
         self._running = False
+        self._protocol: WebTransportProtocol = protocol
 
     async def _apply_randomness(self, id):
         random.seed()
@@ -31,6 +32,8 @@ class Handler:
             self._current_temp = random.normalvariate(self._current_temp, 0.5)
             payload = str(round(self._current_temp, 3)).encode()
             self._http._quic.send_stream_data(id, payload)
+            #self._http.send_datagram(id, payload)
+            self._protocol.transmit()
             print(f"Sent new temp: {self._current_temp}")
             await asyncio.sleep(10)
 
@@ -38,31 +41,32 @@ class Handler:
     def h3_event_received(self, event: H3Event) -> None:
         self._running = True
         if isinstance(event, DatagramReceived):
+            if self._update_task:
+                self._update_task.cancel()
             print("Datagram received\n")
-            pass
-
-        if isinstance(event, WebTransportStreamDataReceived):
-            print("Stream data received: {}".format(event.data))
             self._current_temp = float(event.data)
             loop = asyncio.get_event_loop()
             self._update_task = loop.create_task(self._apply_randomness(event.stream_id))
             # When connection ends, a final message is sent to client - if the stream was unidirectional, this requires opening a new return stream.
-            if event.stream_ended:
-                if stream_is_unidirectional(event.stream_id):
-                    response_id = self._http.create_webtransport_stream(
-                        self._id, is_unidirectional=True)
-                else:
-                    response_id = event.stream_id
-                payload = b"Connection lost"
-                self._http._quic.send_stream_data(
-                    response_id, payload, end_stream=True)
-                self.stream_closed(event.stream_id)
-            else:
-                self._http._quic.send_stream_data(event.stream_id, event.data)
 
-    def stream_closed(self, stream_id: int) -> None:
+        if isinstance(event, WebTransportStreamDataReceived):
+            # When connection ends, a final message is sent to client - if the stream was unidirectional, this requires opening a new return stream.
+            if event.stream_ended:
+               self.stream_closed()
+            else:
+                print("Stream data received: {}".format(event.data))
+                if self._update_task:
+                    print("Cancelling current task")
+                    self._update_task.cancel()
+                self._current_temp = float(event.data)
+                loop = asyncio.get_event_loop()
+                self._update_task = loop.create_task(self._apply_randomness(event.stream_id))
+
+    def stream_closed(self) -> None:
         #self._http._quic.send_stream_data()
-        print("This stream is finished\n")
+        if self._update_task:
+            self._update_task.cancel()
+        print("Stream has been closed.\n")
 
 
 class WebTransportProtocol(QuicConnectionProtocol):
@@ -79,7 +83,7 @@ class WebTransportProtocol(QuicConnectionProtocol):
             # Streams in QUIC can be closed in two ways: normal (FIN) and
             # abnormal (resets).  FIN is handled by the handler; the code
             # below handles the resets.
-            self._handler.stream_closed(event.stream_id)
+            self._handler.stream_closed()
 
         if self._http is not None:
             for h3_event in self._http.handle_event(event):
@@ -110,7 +114,7 @@ class WebTransportProtocol(QuicConnectionProtocol):
             return
         if path == b"/tempcontroller" and self._http:
             assert(self._handler is None)
-            self._handler = Handler(stream_id, self._http)
+            self._handler = Handler(self, stream_id, self._http)
             self._send_response(stream_id, 200)
         else:
             self._send_response(stream_id, 404, end_stream=True)
