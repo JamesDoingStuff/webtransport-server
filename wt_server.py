@@ -11,10 +11,15 @@ import asyncio
 import logging
 from typing import Optional, Dict
 import random
+import numpy as np
+import json
 
 
 BIND_ADDRESS = '::1'
 BIND_PORT = 4433
+
+DATASET_1 = np.linspace(0,100,100) 
+DATASET_2 = np.linspace(100,200,100)
 
 
 class Handler:
@@ -25,6 +30,7 @@ class Handler:
         self._update_task = None
         self._running = False
         self._protocol: WebTransportProtocol = protocol
+        self._pv_directory: dict = {}
 
     async def _apply_randomness(self, id):
         random.seed()
@@ -55,12 +61,12 @@ class Handler:
                self.stream_closed()
             else:
                 print("Stream data received: {}".format(event.data))
-                if self._update_task:
-                    print("Cancelling current task")
-                    self._update_task.cancel()
-                self._current_temp = float(event.data)
-                loop = asyncio.get_event_loop()
-                self._update_task = loop.create_task(self._apply_randomness(event.stream_id))
+                json_dict = json.loads(event.data)
+                print("Stream ID: ", event.stream_id)
+                self._pv_directory.update({f"{json_dict['pv']}": f"{event.stream_id}"})
+                print(self._pv_directory)
+
+
 
     def stream_closed(self) -> None:
         #self._http._quic.send_stream_data()
