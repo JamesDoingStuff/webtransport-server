@@ -13,6 +13,7 @@ from typing import Optional, Dict
 import random
 import numpy as np
 import json
+from math import isclose
 
 
 BIND_ADDRESS = '::1'
@@ -26,7 +27,7 @@ class Handler:
     def __init__(self, protocol, id, http: H3Connection) -> None:
         self._id = id
         self._http = http
-        self._current_temp = 0.0
+        self._current_temps = {}
         self._update_task = None
         self._running = False
         self._protocol: WebTransportProtocol = protocol
@@ -42,6 +43,22 @@ class Handler:
             self._protocol.transmit()
             print(f"Sent new temp: {self._current_temp}")
             await asyncio.sleep(10)
+    
+    async def _update_value(self, event: WebTransportStreamDataReceived):
+        received_data = json.loads(event.data)
+        pv_name = received_data["pv"]
+        current_value = float(received_data["value"])
+        temp = self._current_temps.get(pv_name, 0)
+        RESOLUTION = 0.1
+        while not isclose(temp, current_value, abs_tol=RESOLUTION):
+            temp += RESOLUTION if temp < current_value else -RESOLUTION
+            payload = str(round(temp, 3)).encode()
+            self._http._quic.send_stream_data(event.stream_id, payload)
+            self._protocol.transmit()
+            print(f"Sent new temp: {temp}")
+            await asyncio.sleep(0.1)
+        self._current_temps.update({pv_name: f"{temp}"})
+
 
 
     def h3_event_received(self, event: H3Event) -> None:
@@ -57,14 +74,17 @@ class Handler:
 
         if isinstance(event, WebTransportStreamDataReceived):
             # When connection ends, a final message is sent to client - if the stream was unidirectional, this requires opening a new return stream.
+            pass
             if event.stream_ended:
                self.stream_closed()
             else:
-                print("Stream data received: {}".format(event.data))
-                json_dict = json.loads(event.data)
-                print("Stream ID: ", event.stream_id)
-                self._pv_directory.update({f"{json_dict['pv']}": f"{event.stream_id}"})
-                print(self._pv_directory)
+                
+                print("Stream {} data received: {}".format(event.stream_id, event.data))
+                loop = asyncio.get_event_loop()
+                self._update_task = loop.create_task(self._update_value(event))
+
+
+
 
 
 
