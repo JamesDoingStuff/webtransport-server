@@ -19,69 +19,87 @@ from math import isclose
 BIND_ADDRESS = '::1'
 BIND_PORT = 4433
 
-DATASET_1 = np.linspace(0,100,100) 
-DATASET_2 = np.linspace(100,200,100)
+
+class Pv:
+    def __init__(self, name, initial_value=0) -> None:
+        self._name: str = name
+        self._initial_value = initial_value
+        self._updater_task: asyncio.Task | None = None
+        self._current_value: float | None = None
+        self._stream_id: int | None = None
 
 
 class Handler:
     def __init__(self, protocol, id, http: H3Connection) -> None:
         self._id = id
         self._http = http
-        self._current_temps = {}
         self._update_task = None
         self._running = False
         self._protocol: WebTransportProtocol = protocol
-        self._pv_directory: dict = {}
-
-    async def _apply_randomness(self, id):
-        random.seed()
-        while self._running:
-            self._current_temp = random.normalvariate(self._current_temp, 0.5)
-            payload = str(round(self._current_temp, 3)).encode()
-            self._http._quic.send_stream_data(id, payload)
-            #self._http.send_datagram(id, payload)
-            self._protocol.transmit()
-            print(f"Sent new temp: {self._current_temp}")
-            await asyncio.sleep(10)
+        self._pv_directory: dict[str, Pv] = {} # Dictionary with PV names as keys and PV objects as values
     
     async def _update_value(self, event: WebTransportStreamDataReceived):
-        received_data = json.loads(event.data)
-        pv_name = received_data["pv"]
-        current_value = float(received_data["value"])
-        temp = self._current_temps.get(pv_name, 0)
+        received_data = json.loads(event.data) # Everything sent by the client
+
+        pv_name: str = received_data["pv"] # Which PV is the client after?
+        target_value = float(received_data["value"]) # TO-DO: This should be optional, or tied to the SET command
+
+        target_pv: Pv = self._pv_directory[pv_name] # TO-DO: Deal with new PVs? Should PVs be created here or by client?
+
+        # temp = float(self._pv_directory[pv_name].get(pv_name, 0)) # This is outdated, from when the directory stored the current value
+
+        current_value = target_pv._current_value if target_pv._current_value else target_pv._initial_value
+
         RESOLUTION = 0.1
-        while not isclose(temp, current_value, abs_tol=RESOLUTION):
-            temp += RESOLUTION if temp < current_value else -RESOLUTION
-            payload = str(round(temp, 3)).encode()
+
+        while not isclose(current_value, target_value, abs_tol=0.5*RESOLUTION):
+            current_value += RESOLUTION if current_value < target_value else -RESOLUTION
+            payload = str(round(current_value, 3)).encode()
             self._http._quic.send_stream_data(event.stream_id, payload)
             self._protocol.transmit()
-            print(f"Sent new temp: {temp}")
+            print(f"Sent new value: {current_value}")
+            target_pv._current_value = current_value
             await asyncio.sleep(0.1)
-        self._current_temps.update({pv_name: f"{temp}"})
 
 
 
     def h3_event_received(self, event: H3Event) -> None:
         self._running = True
         if isinstance(event, DatagramReceived):
-            if self._update_task:
-                self._update_task.cancel()
-            print("Datagram received\n")
-            self._current_temp = float(event.data)
-            loop = asyncio.get_event_loop()
-            self._update_task = loop.create_task(self._apply_randomness(event.stream_id))
+            print("Datagram received - ignoring")
+            pass
+            # if self._update_task:
+            #     self._update_task.cancel()
+            # print("Datagram received\n")
+            # self._current_temp = float(event.data)
+            # loop = asyncio.get_event_loop()
+            # self._update_task = loop.create_task(self._apply_randomness(event.stream_id))
             # When connection ends, a final message is sent to client - if the stream was unidirectional, this requires opening a new return stream.
 
         if isinstance(event, WebTransportStreamDataReceived):
             # When connection ends, a final message is sent to client - if the stream was unidirectional, this requires opening a new return stream.
-            pass
             if event.stream_ended:
                self.stream_closed()
             else:
-                
-                print("Stream {} data received: {}".format(event.stream_id, event.data))
-                loop = asyncio.get_event_loop()
-                self._update_task = loop.create_task(self._update_value(event))
+                received_payload = event.data.decode()
+                print("Stream {} data received: {}".format(event.stream_id, received_payload))
+                received_data: dict = json.loads(received_payload)
+                if "command" in received_data.keys():
+                    if received_data["pv"] not in self._pv_directory: # TO-DO: Add key checking
+                        print("Unrecognised PV name - creating new PV")
+                        self._pv_directory.update({received_data["pv"]: Pv(name=received_data["pv"])})
+
+                    pv_name = received_data["pv"] # Which PV is the client after?
+                    target_pv: Pv = self._pv_directory[pv_name] # TO-DO: Deal with new PVs? Should PVs be created here or by client?
+
+
+                    if received_data["command"] == "set":
+                        if target_pv._updater_task:
+                            target_pv._updater_task.cancel()
+                        print("Set command received - initiating updater")
+                        loop = asyncio.get_event_loop()
+                        target_pv._updater_task = loop.create_task(self._update_value(event))
+
 
 
 
