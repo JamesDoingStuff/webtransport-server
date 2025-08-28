@@ -100,10 +100,34 @@ class Handler:
                         loop = asyncio.get_event_loop()
                         target_pv._updater_task = loop.create_task(self._update_value(event))
 
+    def stream_closed(self) -> None:
+        #self._http._quic.send_stream_data()
+        if self._update_task:
+            self._update_task.cancel()
+        print("Stream has been closed.\n")
 
 
+class MassHandler:
+    def __init__(self, protocol, id, http: H3Connection) -> None:
+        self._id = id
+        self._http = http
+        self._update_task = None
+        self._running = False
+        self._protocol: WebTransportProtocol = protocol
 
+    def h3_event_received(self, event: H3Event) -> None:
+        self._running = True
+        if isinstance(event, DatagramReceived):
+            print("Datagram received - ignoring")
+            pass
+            
 
+        if isinstance(event, WebTransportStreamDataReceived):
+            if event.stream_ended:
+               self.stream_closed()
+            else:
+                received_payload = event.data.decode()
+                print("Mass data received on {}: {}".format(event.stream_id, received_payload))
 
 
     def stream_closed(self) -> None:
@@ -118,7 +142,7 @@ class WebTransportProtocol(QuicConnectionProtocol):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._http: Optional[H3Connection] = None
-        self._handler: Optional[Handler] = None
+        self._handler: Optional[Handler|MassHandler] = None
 
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, ProtocolNegotiated):
@@ -159,6 +183,10 @@ class WebTransportProtocol(QuicConnectionProtocol):
         if path == b"/tempcontroller" and self._http:
             assert(self._handler is None)
             self._handler = Handler(self, stream_id, self._http)
+            self._send_response(stream_id, 200)
+        elif path == b"/stress" and self._http:
+            assert(self._handler is None)
+            self._handler = MassHandler(self, stream_id, self._http)
             self._send_response(stream_id, 200)
         else:
             self._send_response(stream_id, 404, end_stream=True)
